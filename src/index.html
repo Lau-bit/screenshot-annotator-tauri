@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:;">
+  <title>Screenshot Annotator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Tab bar -->
+  <div id="tab-bar">
+    <button id="btn-clear-workspace" title="Clear workspace">↻</button>
+    <button id="btn-settings" title="Settings">⚙</button>
+  </div>
+
+  <div id="settings-menu" aria-hidden="true">
+    <div class="settings-section-title">Window</div>
+    <button type="button" class="settings-action" id="setting-save-window-shape">Save current window shape and size</button>
+    <label class="settings-option">
+      <input type="checkbox" id="setting-square-app-corners">
+      <span>Square app corners (outer corners only)</span>
+    </label>
+  </div>
+
+  <!-- Tools toolbar -->
+  <div id="toolbar">
+    <button class="tool-btn active" data-tool="draw" title="Freehand pen">Draw</button>
+    <button class="tool-btn" data-tool="rect" title="Rectangle (non-filled)">Rect</button>
+    <button class="tool-btn" data-tool="circle" title="Circle (non-filled)">Circle</button>
+    <button class="tool-btn" data-tool="line" title="Straight line">Line</button>
+    <button class="tool-btn" data-tool="text" title="Add text">Text</button>
+    <select id="text-size-select" title="Text size">
+      <option value="14">14</option>
+      <option value="18">18</option>
+      <option value="24" selected>24</option>
+      <option value="32">32</option>
+      <option value="48">48</option>
+      <option value="64">64</option>
+    </select>
+    <button class="tool-btn" data-tool="erase" title="Erase annotations (restores original)">Erase</button>
+
+    <div class="toolbar-divider"></div>
+
+    <button class="color-swatch active" data-color="#ffcc00" style="background:#ffcc00" title="Yellow"></button>
+    <button class="color-swatch" data-color="#ff9500" style="background:#ff9500" title="Orange"></button>
+    <button class="color-swatch" data-color="#ff0000" style="background:#ff0000" title="Red"></button>
+    <button class="color-swatch" data-color="#00cc44" style="background:#00cc44" title="Green"></button>
+    <button class="color-swatch" data-color="#0077ff" style="background:#0077ff" title="Blue"></button>
+    <button class="color-swatch" data-color="#00cccc" style="background:#00cccc" title="Teal"></button>
+    <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="White"></button>
+    <button class="color-swatch" data-color="#000000" style="background:#000000" title="Black"></button>
+    <button class="color-swatch" data-color="#9b5cff" style="background:#9b5cff" title="Purple"></button>
+
+    <div class="custom-color-wrapper">
+      <input type="color" id="color-picker-input" value="#ffcc00">
+      <button id="btn-custom-color" title="Custom color">&#x25A0;</button>
+    </div>
+  </div>
+
+  <!-- Image adjustments bar -->
+  <div id="image-bar">
+    <label class="ibar-label" for="brightness-slider">B</label>
+    <input type="range" id="brightness-slider" min="0" max="200" value="100" step="1">
+    <span id="brightness-value" class="ibar-val">100</span>
+    <button class="ibar-btn ibar-reset" id="btn-reset-brightness" title="Reset brightness">↺</button>
+    <label class="ibar-label" for="contrast-slider">C</label>
+    <input type="range" id="contrast-slider" min="0" max="200" value="100" step="1">
+    <span id="contrast-value" class="ibar-val">100</span>
+    <button class="ibar-btn ibar-reset" id="btn-reset-contrast" title="Reset contrast">↺</button>
+    <div class="toolbar-divider"></div>
+    <button class="ibar-btn" id="btn-rotate-ccw" title="Rotate 90° counter-clockwise">↺ 90°</button>
+    <button class="ibar-btn" id="btn-rotate-cw" title="Rotate 90° clockwise">↻ 90°</button>
+    <button class="ibar-btn" id="btn-reset-rotation" title="Reset rotation to 0°">0°</button>
+    <span id="rotation-display" class="ibar-val ibar-rot">0°</span>
+    <span class="ibar-hint">Ctrl+drag to rotate</span>
+    <button class="ibar-btn" id="btn-toggle-split" title="Toggle split view">Split</button>
+  </div>
+
+  <!-- Canvas area -->
+  <div id="canvas-area">
+    <div class="editor-pane focused" id="editor-left" data-editor="left">
+      <div id="empty-hint" class="empty-hint">
+        <p>Paste a screenshot</p>
+        <p class="hint-sub">Ctrl+V</p>
+      </div>
+
+      <div id="canvas-wrapper" class="canvas-wrapper">
+        <canvas id="base-canvas" class="base-canvas"></canvas>
+        <canvas id="canvas" class="annotation-canvas"></canvas>
+
+        <div id="crop-overlay" class="crop-overlay">
+          <div class="crop-handle" data-dir="nw"></div>
+          <div class="crop-handle" data-dir="n"></div>
+          <div class="crop-handle" data-dir="ne"></div>
+          <div class="crop-handle" data-dir="e"></div>
+          <div class="crop-handle" data-dir="se"></div>
+          <div class="crop-handle" data-dir="s"></div>
+          <div class="crop-handle" data-dir="sw"></div>
+          <div class="crop-handle" data-dir="w"></div>
+        </div>
+
+        <div id="text-input-wrapper" class="text-input-wrapper">
+          <div id="text-drag-handle" class="text-drag-handle" title="Drag to reposition">⠿</div>
+          <input type="text" id="text-input" class="text-input" placeholder="Type here, Enter to commit">
+        </div>
+      </div>
+    </div>
+
+    <div class="editor-pane" id="editor-right" data-editor="right" hidden>
+      <div id="empty-hint-right" class="empty-hint">
+        <p>Paste a screenshot</p>
+        <p class="hint-sub">Ctrl+V</p>
+      </div>
+
+      <div id="canvas-wrapper-right" class="canvas-wrapper">
+        <canvas id="base-canvas-right" class="base-canvas"></canvas>
+        <canvas id="canvas-right" class="annotation-canvas"></canvas>
+
+        <div id="crop-overlay-right" class="crop-overlay">
+          <div class="crop-handle" data-dir="nw"></div>
+          <div class="crop-handle" data-dir="n"></div>
+          <div class="crop-handle" data-dir="ne"></div>
+          <div class="crop-handle" data-dir="e"></div>
+          <div class="crop-handle" data-dir="se"></div>
+          <div class="crop-handle" data-dir="s"></div>
+          <div class="crop-handle" data-dir="sw"></div>
+          <div class="crop-handle" data-dir="w"></div>
+        </div>
+
+        <div id="text-input-wrapper-right" class="text-input-wrapper">
+          <div id="text-drag-handle-right" class="text-drag-handle" title="Drag to reposition">⠿</div>
+          <input type="text" id="text-input-right" class="text-input" placeholder="Type here, Enter to commit">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom bar -->
+  <div id="bottom-bar">
+    <div id="bottom-left">
+      <button id="btn-save">Save</button>
+      <button id="btn-save-as">Save As</button>
+    </div>
+    <div id="bottom-right">
+      <label for="scale-select" style="color:#666;font-size:11px;">Copy scale:</label>
+      <select id="scale-select" title="Scale applied when copying to clipboard">
+        <option value="1" selected>100%</option>
+        <option value="0.75">75%</option>
+        <option value="0.5">50%</option>
+        <option value="0.25">25%</option>
+      </select>
+      <button id="btn-copy-image">Copy Image</button>
+    </div>
+  </div>
+
+  <div id="folder-bar">
+    <span id="folder-display">No folder selected</span>
+    <button id="btn-pick-folder">Pick Folder</button>
+    <button id="btn-open-folder">Open Images</button>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
