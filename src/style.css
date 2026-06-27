@@ -523,16 +523,59 @@ input[type="range"] {
   height: 22px;
 }
 
-#scale-select {
+.scale-dropdown {
+  position: relative;
+}
+
+.scale-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   background: #2a2a2a;
   border: 1px solid #3a3a3a;
   color: #aaa;
   font-size: 11px;
-  padding: 2px 4px;
+  padding: 2px 6px;
   border-radius: 3px;
   cursor: pointer;
   height: 22px;
 }
+.scale-trigger:hover { border-color: #666; }
+
+.scale-caret {
+  font-size: 9px;
+  color: #888;
+  transition: transform 0.1s;
+}
+.scale-dropdown.open .scale-caret { transform: rotate(180deg); }
+
+.scale-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.4);
+  display: none;
+  z-index: 50;
+}
+.scale-dropdown.open .scale-menu { display: block; }
+
+.scale-option {
+  font-size: 11px;
+  color: #aaa;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.scale-option:hover { background: #3a3a3a; color: var(--text); }
+.scale-option.selected { color: #5aabff; }
 
 #folder-bar {
   height: var(--folder-h);

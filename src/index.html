@@ -144,13 +144,19 @@
       <button id="btn-save-as">Save As</button>
     </div>
     <div id="bottom-right">
-      <label for="scale-select" style="color:#666;font-size:11px;">Copy scale:</label>
-      <select id="scale-select" title="Scale applied when copying to clipboard">
-        <option value="1" selected>100%</option>
-        <option value="0.75">75%</option>
-        <option value="0.5">50%</option>
-        <option value="0.25">25%</option>
-      </select>
+      <span style="color:#666;font-size:11px;">Copy scale:</span>
+      <div id="scale-dropdown" class="scale-dropdown">
+        <button type="button" id="scale-trigger" class="scale-trigger" aria-haspopup="listbox" aria-expanded="false" title="Scale applied when copying to clipboard">
+          <span id="scale-trigger-label">100%</span>
+          <span class="scale-caret">▴</span>
+        </button>
+        <ul id="scale-menu" class="scale-menu" role="listbox">
+          <li role="option" class="scale-option selected" data-value="1">100%</li>
+          <li role="option" class="scale-option" data-value="0.75">75%</li>
+          <li role="option" class="scale-option" data-value="0.5">50%</li>
+          <li role="option" class="scale-option" data-value="0.25">25%</li>
+        </ul>
+      </div>
       <button id="btn-copy-image">Copy Image</button>
     </div>
   </div>

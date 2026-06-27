@@ -30,7 +30,11 @@ const btnSave = document.getElementById('btn-save');
 const btnSaveAs = document.getElementById('btn-save-as');
 const btnCopyImage = document.getElementById('btn-copy-image');
 const btnToggleSplit = document.getElementById('btn-toggle-split');
-const scaleSelect = document.getElementById('scale-select');
+const scaleDropdown = document.getElementById('scale-dropdown');
+const scaleTrigger = document.getElementById('scale-trigger');
+const scaleTriggerLabel = document.getElementById('scale-trigger-label');
+const scaleMenu = document.getElementById('scale-menu');
+let copyScale = 1;
 const textSizeSelect = document.getElementById('text-size-select');
 const toast = document.getElementById('toast');
 const brightnessSlider = document.getElementById('brightness-slider');
@@ -1278,14 +1282,35 @@ async function copyImage() {
     return;
   }
   saveVisibleEditorsToVersions();
-  const scale = parseFloat(scaleSelect.value);
-  const ok = await window.annotatorAPI.writeClipboardImage(getOutputDataURL(editor, scale));
+  const ok = await window.annotatorAPI.writeClipboardImage(getOutputDataURL(editor, copyScale));
   showToast(ok ? 'Copied to clipboard' : 'Copy failed');
 }
 
 btnSave.addEventListener('click', save);
 btnSaveAs.addEventListener('click', saveAs);
 btnCopyImage.addEventListener('click', copyImage);
+
+function setScaleMenuOpen(open) {
+  scaleDropdown.classList.toggle('open', open);
+  scaleTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+scaleTrigger.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setScaleMenuOpen(!scaleDropdown.classList.contains('open'));
+});
+
+scaleMenu.addEventListener('click', (e) => {
+  const option = e.target.closest('.scale-option');
+  if (!option) return;
+  copyScale = parseFloat(option.dataset.value);
+  scaleTriggerLabel.textContent = option.textContent;
+  scaleMenu.querySelectorAll('.scale-option').forEach((el) =>
+    el.classList.toggle('selected', el === option));
+  setScaleMenuOpen(false);
+});
+
+document.addEventListener('click', () => setScaleMenuOpen(false));
 
 function updateFolderDisplay() {
   folderDisplay.textContent = state.saveFolder || 'No folder selected';
