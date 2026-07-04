@@ -8,8 +8,8 @@ const state = {
   activeVersion: -1,
   focusedEditorIndex: 0,
   splitMode: false,
-  tool: 'draw',
-  color: '#ffcc00',
+  tool: 'rect',
+  color: '#ff9500',
   textSize: 24,
   saveFolder: null,
 };
