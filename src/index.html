@@ -11,6 +11,17 @@
 
   <!-- Tab bar -->
   <div id="tab-bar">
+    <!-- version tabs are inserted here, before the spacer -->
+    <div class="tab-spacer"></div>
+    <div id="measure-controls" hidden>
+      <span class="measure-bar-label">MEASURE</span>
+      <button class="ibar-btn" id="btn-measure-scope" aria-label="Reference scope lock" title="Reference locked to screenshot dimensions — click to use full app area">🔒</button>
+      <span class="ibar-label">Axis</span>
+      <button class="ibar-btn measure-axis active" data-axis="h" title="Measure widths — % of horizontal space">↔ %</button>
+      <button class="ibar-btn measure-axis" data-axis="v" title="Measure heights — % of vertical space">↕ %</button>
+      <button class="ibar-btn" id="btn-measure-bake" title="Bake current guides into the image (undoable)">Bake</button>
+      <button class="ibar-btn" id="btn-measure-reset" title="Reset reference to full and clear markers">Reset</button>
+    </div>
     <button id="btn-clear-workspace" title="Clear workspace">↻</button>
     <button id="btn-settings" title="Settings">⚙</button>
   </div>
@@ -21,6 +32,15 @@
     <label class="settings-option">
       <input type="checkbox" id="setting-square-app-corners">
       <span>Square app corners (outer corners only)</span>
+    </label>
+    <div class="settings-section-title">Measurement</div>
+    <label class="settings-option">
+      <input type="checkbox" id="setting-measure-default-screenshot">
+      <span>Default reference to screenshot width (off = app width)</span>
+    </label>
+    <label class="settings-option settings-slider">
+      <span>Overlay opacity</span>
+      <input type="range" id="setting-measure-opacity" min="20" max="100" step="5" value="90">
     </label>
   </div>
 
@@ -76,6 +96,8 @@
     <span id="rotation-display" class="ibar-val ibar-rot">0°</span>
     <span class="ibar-hint">Ctrl+drag to rotate</span>
     <button class="ibar-btn" id="btn-toggle-split" title="Toggle split view">Split</button>
+    <div class="toolbar-divider"></div>
+    <button class="ibar-btn" id="btn-measure" title="Toggle relative measurement layer (% of a reference region)">Measure</button>
   </div>
 
   <!-- Canvas area -->
@@ -106,6 +128,8 @@
           <input type="text" id="text-input" class="text-input" placeholder="Type here, Enter to commit">
         </div>
       </div>
+
+      <div id="measure-layer" class="measure-layer"></div>
     </div>
 
     <div class="editor-pane" id="editor-right" data-editor="right" hidden>
@@ -134,6 +158,8 @@
           <input type="text" id="text-input-right" class="text-input" placeholder="Type here, Enter to commit">
         </div>
       </div>
+
+      <div id="measure-layer-right" class="measure-layer"></div>
     </div>
   </div>
 

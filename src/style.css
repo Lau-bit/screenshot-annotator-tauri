@@ -6,6 +6,7 @@
   --text: #d4d4d4;
   --text-muted: #888;
   --accent: #0077ff;
+  --measure: #00e0ff;
   --tab-h: 30px;
   --toolbar-h: 36px;
   --bottom-h: 30px;
@@ -75,12 +76,16 @@ html, body {
 }
 .tab-close:hover { opacity: 1; color: #ff6666; }
 
+.tab-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
 #btn-clear-workspace {
-  margin-left: auto;
   position: sticky;
   right: 34px;
   z-index: 3;
-  background: none;
+  background: var(--panel);
   border: none;
   border-left: 1px solid var(--border);
   color: var(--text-muted);
@@ -174,6 +179,16 @@ html, body {
   height: 14px;
   accent-color: var(--accent);
   flex-shrink: 0;
+}
+
+.settings-slider {
+  justify-content: space-between;
+}
+.settings-slider input[type="range"] {
+  width: 110px;
+  height: 14px;
+  accent-color: var(--measure);
+  cursor: pointer;
 }
 
 /* ── Toolbar ──────────────────────────────────────────────────────────── */
@@ -635,3 +650,148 @@ input[type="range"] {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* ── Measurement layer ────────────────────────────────────────────────── */
+
+/* Measure controls live inline in the tab-bar's empty right area (pushed there
+   by .tab-spacer), so they use existing space instead of an extra row. Author
+   display rule must restate [hidden] to win over `display:flex`. */
+#measure-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  /* Pin to the right, just left of the 34px ↻ + 34px ⚙ sticky buttons, so tabs
+     scroll underneath instead of shoving these off-screen. */
+  position: sticky;
+  right: 68px;
+  z-index: 2;
+  background: var(--panel);
+}
+#measure-controls[hidden] { display: none; }
+
+.measure-bar-label {
+  color: var(--measure);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  flex-shrink: 0;
+}
+
+.measure-axis.active {
+  border-color: var(--measure);
+  color: var(--text);
+  background: rgba(0, 224, 255, 0.14);
+}
+#btn-measure.active {
+  border-color: var(--measure);
+  color: var(--text);
+  background: rgba(0, 224, 255, 0.14);
+}
+/* Reference-scope lock: a compact icon (state via fill + hover tooltip) so it
+   stays put in narrow windows. Filled = locked to screenshot; hollow = app. */
+#btn-measure-scope {
+  border-color: var(--measure);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+#btn-measure-scope:hover { background: rgba(0, 224, 255, 0.14); }
+#btn-measure-scope.active { background: rgba(0, 224, 255, 0.18); }
+
+/* The layer fills the pane in pane (screen) coordinates and sits above the
+   image transform, so guides never follow the image's pan/zoom/rotation. */
+.measure-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: none;
+  pointer-events: none;      /* only the reference frame + its parts are hit-testable */
+  overflow: hidden;
+}
+.measure-layer.on { display: block; }
+
+.m-ref {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--measure);
+  background: rgba(0, 224, 255, 0.05);
+  pointer-events: auto;
+  cursor: move;
+}
+
+.m-badge {
+  position: absolute;
+  top: 0; left: 0;
+  transform: translateY(-100%);
+  background: var(--measure);
+  color: #012;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px 3px 0 0;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.m-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 1px solid var(--measure);
+  border-radius: 1px;
+  pointer-events: auto;
+}
+.m-handle[data-dir="nw"] { top: -5px; left: -5px; cursor: nw-resize; }
+.m-handle[data-dir="n"]  { top: -5px; left: calc(50% - 5px); cursor: n-resize; }
+.m-handle[data-dir="ne"] { top: -5px; right: -5px; cursor: ne-resize; }
+.m-handle[data-dir="e"]  { top: calc(50% - 5px); right: -5px; cursor: e-resize; }
+.m-handle[data-dir="se"] { bottom: -5px; right: -5px; cursor: se-resize; }
+.m-handle[data-dir="s"]  { bottom: -5px; left: calc(50% - 5px); cursor: s-resize; }
+.m-handle[data-dir="sw"] { bottom: -5px; left: -5px; cursor: sw-resize; }
+.m-handle[data-dir="w"]  { top: calc(50% - 5px); left: -5px; cursor: w-resize; }
+
+/* Marker divider lines. The element is a wide transparent hit area; the
+   visible hairline is drawn by ::before so it stays easy to grab. */
+.m-mark { position: absolute; pointer-events: auto; }
+.m-mark::before {
+  content: '';
+  position: absolute;
+  background: var(--measure);
+}
+.m-mark-h {
+  top: 0; height: 100%;
+  width: 9px; margin-left: -4px;
+  cursor: ew-resize;
+}
+.m-mark-h::before { top: 0; bottom: 0; left: 4px; width: 1.5px; }
+.m-mark-v {
+  left: 0; width: 100%;
+  height: 9px; margin-top: -4px;
+  cursor: ns-resize;
+}
+.m-mark-v::before { left: 0; right: 0; top: 4px; height: 1.5px; }
+
+.m-label {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.m-label-h { top: 3px; transform: translateX(-50%); }
+.m-label-v { left: 3px; transform: translateY(-50%); }
+
+/* Dim the axis you are not currently editing so the active one reads clearly. */
+.m-ref.axis-h .m-mark-v,
+.m-ref.axis-h .m-label-v,
+.m-ref.axis-v .m-mark-h,
+.m-ref.axis-v .m-label-h { opacity: 0.4; }

@@ -12,6 +12,21 @@ const state = {
   color: '#ff9500',
   textSize: 24,
   saveFolder: null,
+  // Relative-measurement layer. Ephemeral (never saved to a version or disk) and
+  // global — the same guides render over every version and in both split panes,
+  // so flipping versions gives a quick cross-version compare.
+  // Coordinates are fractions (0..1) of the SCREENSHOT (image), so the layer is
+  // anchored to the image content: guides follow the image's pan/zoom and stay
+  // glued to the actual UI. They stay screen-axis-aligned though — the render
+  // applies translate+scale but NOT the image's rotation.
+  measure: {
+    on: false,
+    axis: 'h',                    // which axis new markers land on: 'h' width, 'v' height
+    ref: { x: 0, y: 0, w: 1, h: 1 }, // reference region = "the view" that counts as 100% (image fractions)
+    refSet: false,                // has the user positioned the reference? drives the default on activate
+    hMarks: [],                   // vertical dividers, fraction 0..1 across ref width
+    vMarks: [],                   // horizontal dividers, fraction 0..1 across ref height
+  },
 };
 
 const tabBar = document.getElementById('tab-bar');
@@ -47,6 +62,15 @@ const btnRotateCCW = document.getElementById('btn-rotate-ccw');
 const btnResetRotation = document.getElementById('btn-reset-rotation');
 const btnResetBrightness = document.getElementById('btn-reset-brightness');
 const btnResetContrast = document.getElementById('btn-reset-contrast');
+const btnMeasure = document.getElementById('btn-measure');
+const measureControls = document.getElementById('measure-controls');
+const tabSpacer = document.querySelector('.tab-spacer');
+const measureAxisButtons = document.querySelectorAll('.measure-axis');
+const btnMeasureBake = document.getElementById('btn-measure-bake');
+const btnMeasureReset = document.getElementById('btn-measure-reset');
+const btnMeasureScope = document.getElementById('btn-measure-scope');
+const settingMeasureDefaultScreenshot = document.getElementById('setting-measure-default-screenshot');
+const settingMeasureOpacity = document.getElementById('setting-measure-opacity');
 
 function getCtx(canvas) {
   return canvas.getContext('2d', { willReadFrequently: true });
@@ -64,6 +88,7 @@ function makeEditor(index, ids) {
     textInputWrapper: document.getElementById(ids.textInputWrapper),
     textInput: document.getElementById(ids.textInput),
     textDragHandle: document.getElementById(ids.textDragHandle),
+    measureLayer: document.getElementById(ids.measureLayer),
     versionIndex: -1,
     zoom: 1,
     panX: 0,
@@ -102,6 +127,7 @@ const editors = [
     textInputWrapper: 'text-input-wrapper',
     textInput: 'text-input',
     textDragHandle: 'text-drag-handle',
+    measureLayer: 'measure-layer',
   }),
   makeEditor(1, {
     pane: 'editor-right',
@@ -113,6 +139,7 @@ const editors = [
     textInputWrapper: 'text-input-wrapper-right',
     textInput: 'text-input-right',
     textDragHandle: 'text-drag-handle-right',
+    measureLayer: 'measure-layer-right',
   }),
 ];
 
@@ -120,19 +147,30 @@ let appSettings = defaultAppSettings();
 let toastTimer;
 
 function defaultAppSettings() {
-  return { squareAppCorners: false };
+  return { squareAppCorners: false, measureOpacity: 0.9, measureDefaultScreenshot: true };
 }
 
 function normalizeAppSettings(settings) {
+  const s = settings || {};
   return {
     ...defaultAppSettings(),
-    ...(settings || {}),
-    squareAppCorners: !!settings?.squareAppCorners,
+    ...s,
+    squareAppCorners: !!s.squareAppCorners,
+    measureOpacity: Number.isFinite(s.measureOpacity) ? clamp(s.measureOpacity, 0.2, 1) : 0.9,
+    // default true unless explicitly disabled
+    measureDefaultScreenshot: s.measureDefaultScreenshot !== false,
   };
 }
 
 function applyAppSettingsInputs() {
   settingSquareAppCorners.checked = appSettings.squareAppCorners;
+  settingMeasureDefaultScreenshot.checked = appSettings.measureDefaultScreenshot;
+  settingMeasureOpacity.value = Math.round(appSettings.measureOpacity * 100);
+  const scopeShot = appSettings.measureDefaultScreenshot;
+  btnMeasureScope.classList.toggle('active', scopeShot);
+  btnMeasureScope.title = scopeShot
+    ? 'Reference locked to screenshot dimensions — click to use full app area'
+    : 'Reference locked to full app area — click to use screenshot dimensions';
 }
 
 async function loadAppSettings() {
@@ -374,6 +412,10 @@ function applyTransform(editor) {
   if (editor === activeEditor()) {
     rotationDisplay.textContent = Math.round(((rotation % 360) + 360) % 360) + '°';
   }
+
+  // Keep the image-anchored measure overlay glued to the image as it pans/zooms.
+  // (renderMeasureEditor is a function declaration, hoisted, so this is safe here.)
+  if (state.measure.on) renderMeasureEditor(editor);
 }
 
 function fitToArea(editor) {
@@ -823,6 +865,9 @@ function redo() {
 }
 
 function renderTabs() {
+  // Full rebuild collapses scrollWidth to 0 mid-way, which resets scrollLeft;
+  // save and restore it so wheel-scrolled tab position survives a re-render.
+  const savedScroll = tabBar.scrollLeft;
   tabBar.querySelectorAll('.tab').forEach((tab) => tab.remove());
   const focused = activeEditor();
 
@@ -850,8 +895,10 @@ function renderTabs() {
     }
 
     tab.addEventListener('click', () => switchFocusedEditorToVersion(i));
-    tabBar.insertBefore(tab, btnClearWorkspace);
+    tabBar.insertBefore(tab, tabSpacer);
   });
+
+  tabBar.scrollLeft = savedScroll;
 }
 
 function switchFocusedEditorToVersion(idx) {
@@ -866,8 +913,12 @@ function switchFocusedEditorToVersion(idx) {
   saveVisibleEditorsToVersions();
   editor.versionIndex = idx;
   state.activeVersion = idx;
-  loadVersionToEditor(editor, state.versions[idx], { fit: editor.canvas.width !== prevW || editor.canvas.height !== prevH });
-  if (editor.canvas.width !== prevW || editor.canvas.height !== prevH) fitToArea(editor);
+  const v = state.versions[idx];
+  // Compare the incoming version's size to the current canvas (loadVersionToEditor
+  // is about to overwrite canvas.width, so this must be read from v, not the canvas).
+  // Fit on a size change; otherwise preserve the current zoom/pan.
+  const sizeChanged = v.annotationData.width !== prevW || v.annotationData.height !== prevH;
+  loadVersionToEditor(editor, v, { fit: sizeChanged });
   renderTabs();
   updateActiveControls();
 }
@@ -915,13 +966,28 @@ function clearWorkspace(showMessage = true) {
   state.versions = [];
   state.activeVersion = -1;
   editors.forEach(clearEditor);
+  // Drop measurement guides so they don't re-anchor onto a future, unrelated image.
+  state.measure.refSet = false;
+  state.measure.ref = { x: 0, y: 0, w: 1, h: 1 };
+  state.measure.hMarks = [];
+  state.measure.vMarks = [];
   focusEditor(editors[0]);
   renderTabs();
   updateActiveControls();
+  renderMeasure();
   if (showMessage) showToast('Workspace cleared');
 }
 
 btnClearWorkspace.addEventListener('click', () => clearWorkspace());
+
+// Vertical wheel over the tab-bar scrolls it horizontally, so tabs stay
+// reachable as they accumulate past the visible width.
+tabBar.addEventListener('wheel', (e) => {
+  if (e.deltaY === 0) return;
+  if (tabBar.scrollWidth <= tabBar.clientWidth) return;
+  tabBar.scrollLeft += e.deltaY;
+  e.preventDefault();
+}, { passive: false });
 
 function setSplitMode(on) {
   saveVisibleEditorsToVersions();
@@ -954,6 +1020,7 @@ function setSplitMode(on) {
   }
 
   renderTabs();
+  renderMeasure();
 }
 
 btnToggleSplit.addEventListener('click', () => setSplitMode(!state.splitMode));
@@ -1021,6 +1088,9 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('paste', (e) => {
+  // Let a focused text-annotation input receive the native text paste instead of
+  // hijacking it into an image paste.
+  if (hasActiveTextInput()) return;
   e.preventDefault();
   pasteFromClipboard();
 });
@@ -1340,6 +1410,328 @@ btnPickFolder.addEventListener('click', async () => {
   updateFolderDisplay();
   showToast('Folder set');
 });
+
+/* ── Relative measurement layer ─────────────────────────────────────────── */
+
+let measureDrag = null;
+
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// Pointer position as a fraction (0..1) of the SCREENSHOT, via the editor's
+// pan/zoom (rotation ignored so guides stay screen-axis-aligned).
+function imgFracFromEvent(editor, e) {
+  const r = editor.pane.getBoundingClientRect();
+  const W = editor.canvas.width;
+  const H = editor.canvas.height;
+  const z = editor.zoom || 1;
+  return {
+    fx: W ? ((e.clientX - r.left) - editor.panX) / (W * z) : 0,
+    fy: H ? ((e.clientY - r.top) - editor.panY) / (H * z) : 0,
+  };
+}
+
+function sortedBoundaries(marks) {
+  return [0, ...[...marks].sort((a, b) => a - b), 1];
+}
+
+function buildMeasureHTML(m, editor) {
+  const ref = m.ref;
+  const W = editor.canvas.width;
+  const H = editor.canvas.height;
+  const z = editor.zoom || 1;
+  // Reference rect in pane (screen) pixels, anchored to the image content.
+  const sx = editor.panX + ref.x * W * z;
+  const sy = editor.panY + ref.y * H * z;
+  const sw = ref.w * W * z;
+  const sh = ref.h * H * z;
+  const pct = (n) => (n * 100) + '%';
+
+  let marks = '';
+  m.hMarks.forEach((f, i) => {
+    marks += `<div class="m-mark m-mark-h" data-axis="h" data-i="${i}" style="left:${pct(f)}"></div>`;
+  });
+  m.vMarks.forEach((f, i) => {
+    marks += `<div class="m-mark m-mark-v" data-axis="v" data-i="${i}" style="top:${pct(f)}"></div>`;
+  });
+
+  let labels = '';
+  const hb = sortedBoundaries(m.hMarks);
+  for (let i = 0; i < hb.length - 1; i++) {
+    const mid = (hb[i] + hb[i + 1]) / 2;
+    labels += `<div class="m-label m-label-h" style="left:${pct(mid)}">${Math.round((hb[i + 1] - hb[i]) * 100)}%</div>`;
+  }
+  const vb = sortedBoundaries(m.vMarks);
+  for (let i = 0; i < vb.length - 1; i++) {
+    const mid = (vb[i] + vb[i + 1]) / 2;
+    labels += `<div class="m-label m-label-v" style="top:${pct(mid)}">${Math.round((vb[i + 1] - vb[i]) * 100)}%</div>`;
+  }
+
+  let handles = '';
+  ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => {
+    handles += `<div class="m-handle" data-dir="${dir}"></div>`;
+  });
+
+  return `<div class="m-ref axis-${m.axis}" style="left:${sx}px;top:${sy}px;width:${sw}px;height:${sh}px">` +
+    `<div class="m-badge">ref 100%</div>${marks}${labels}${handles}</div>`;
+}
+
+function renderMeasureEditor(editor) {
+  const m = state.measure;
+  const layer = editor.measureLayer;
+  if (!layer) return;
+  // Needs an image to anchor to; hide when off / hidden / empty.
+  if (!m.on || editor.pane.hidden || editor.versionIndex < 0 || !editor.canvas.width) {
+    layer.classList.remove('on');
+    layer.innerHTML = '';
+    layer.style.opacity = '';
+    return;
+  }
+  layer.classList.add('on');
+  layer.style.opacity = String(appSettings.measureOpacity);
+  layer.innerHTML = buildMeasureHTML(m, editor);
+}
+
+function renderMeasure() {
+  editors.forEach(renderMeasureEditor);
+}
+
+// The reference the layer starts with when activated and the user hasn't set one.
+function defaultReferenceRect(editor) {
+  if (appSettings.measureDefaultScreenshot || !editor || editor.versionIndex < 0 || !editor.canvas.width) {
+    return { x: 0, y: 0, w: 1, h: 1 }; // full screenshot
+  }
+  // "App width": the pane's visible extent expressed in image fractions.
+  const W = editor.canvas.width;
+  const H = editor.canvas.height;
+  const z = editor.zoom || 1;
+  const paneW = editor.pane.clientWidth;
+  const paneH = editor.pane.clientHeight;
+  const x = (0 - editor.panX) / (W * z);
+  const y = (0 - editor.panY) / (H * z);
+  return { x, y, w: paneW / (W * z), h: paneH / (H * z) };
+}
+
+function setMeasureOn(on) {
+  state.measure.on = on;
+  btnMeasure.classList.toggle('active', on);
+  measureControls.hidden = !on;
+  if (on && !state.measure.refSet) {
+    state.measure.ref = defaultReferenceRect(activeEditor());
+  }
+  renderMeasure();
+}
+
+function setMeasureAxis(axis) {
+  state.measure.axis = axis;
+  measureAxisButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.axis === axis));
+  renderMeasure();
+}
+
+function addMeasureMarker(fx, fy) {
+  const m = state.measure;
+  // Skip near-duplicates so a double-click on the reference doesn't stack two
+  // overlapping markers at (almost) the same spot.
+  const notNear = (arr, f) => !arr.some((g) => Math.abs(g - f) < 0.01);
+  if (m.axis === 'h') {
+    const f = (fx - m.ref.x) / m.ref.w;
+    if (f > 0.01 && f < 0.99 && notNear(m.hMarks, f)) { m.hMarks.push(f); m.hMarks.sort((a, b) => a - b); }
+  } else {
+    const f = (fy - m.ref.y) / m.ref.h;
+    if (f > 0.01 && f < 0.99 && notNear(m.vMarks, f)) { m.vMarks.push(f); m.vMarks.sort((a, b) => a - b); }
+  }
+  renderMeasure();
+}
+
+function attachMeasureEvents(editor) {
+  const layer = editor.measureLayer;
+
+  layer.addEventListener('mousedown', (e) => {
+    if (!state.measure.on || e.button !== 0) return;
+    focusEditor(editor);
+    const m = state.measure;
+    const target = e.target;
+
+    if (target.classList.contains('m-handle')) {
+      measureDrag = { type: 'resize', dir: target.dataset.dir, editor, start: imgFracFromEvent(editor, e), ref0: { ...m.ref } };
+    } else if (target.classList.contains('m-mark')) {
+      measureDrag = { type: 'mark', axis: target.dataset.axis, i: +target.dataset.i, editor, start: imgFracFromEvent(editor, e), moved: false };
+    } else if (target.classList.contains('m-ref') || target.classList.contains('m-label') || target.classList.contains('m-badge')) {
+      measureDrag = { type: 'refmove', editor, start: imgFracFromEvent(editor, e), ref0: { ...m.ref }, moved: false };
+    } else {
+      return; // clicks on the transparent layer fall through to the canvas
+    }
+    e.stopPropagation();
+    e.preventDefault();
+  });
+
+  layer.addEventListener('dblclick', (e) => {
+    if (!e.target.classList.contains('m-mark')) return;
+    const m = state.measure;
+    const arr = e.target.dataset.axis === 'h' ? m.hMarks : m.vMarks;
+    arr.splice(+e.target.dataset.i, 1);
+    renderMeasure();
+    e.stopPropagation();
+  });
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (!measureDrag) return;
+  const m = state.measure;
+  const cur = imgFracFromEvent(measureDrag.editor, e);
+
+  if (measureDrag.type === 'resize') {
+    const dx = cur.fx - measureDrag.start.fx;
+    const dy = cur.fy - measureDrag.start.fy;
+    const r0 = measureDrag.ref0;
+    const min = 0.02;
+    let { x, y, w, h } = r0;
+    const dir = measureDrag.dir;
+    // No 0..1 clamp: the reference may sit anywhere over (or beyond) the image.
+    if (dir.includes('w')) { x = Math.min(r0.x + dx, r0.x + r0.w - min); w = r0.x + r0.w - x; }
+    if (dir.includes('e')) { w = Math.max(min, r0.w + dx); }
+    if (dir.includes('n')) { y = Math.min(r0.y + dy, r0.y + r0.h - min); h = r0.y + r0.h - y; }
+    if (dir.includes('s')) { h = Math.max(min, r0.h + dy); }
+    m.ref = { x, y, w, h };
+    m.refSet = true;
+    renderMeasure();
+  } else if (measureDrag.type === 'refmove') {
+    const dx = cur.fx - measureDrag.start.fx;
+    const dy = cur.fy - measureDrag.start.fy;
+    if (Math.abs(dx) > 0.004 || Math.abs(dy) > 0.004) measureDrag.moved = true;
+    if (measureDrag.moved) {
+      m.ref.x = measureDrag.ref0.x + dx;
+      m.ref.y = measureDrag.ref0.y + dy;
+      m.refSet = true;
+      renderMeasure();
+    }
+  } else if (measureDrag.type === 'mark') {
+    // Ignore sub-threshold movement so a plain click never rebuilds the DOM —
+    // rebuilding would detach the marker mid double-click and kill click-to-delete.
+    if (!measureDrag.moved &&
+        Math.abs(cur.fx - measureDrag.start.fx) < 0.004 &&
+        Math.abs(cur.fy - measureDrag.start.fy) < 0.004) return;
+    measureDrag.moved = true;
+    // Don't re-sort mid-drag: it would shuffle indices under the pointer.
+    if (measureDrag.axis === 'h') {
+      m.hMarks[measureDrag.i] = clamp((cur.fx - m.ref.x) / m.ref.w, 0.001, 0.999);
+    } else {
+      m.vMarks[measureDrag.i] = clamp((cur.fy - m.ref.y) / m.ref.h, 0.001, 0.999);
+    }
+    renderMeasure();
+  }
+});
+
+document.addEventListener('mouseup', () => {
+  if (!measureDrag) return;
+  if (measureDrag.type === 'refmove' && !measureDrag.moved) {
+    addMeasureMarker(measureDrag.start.fx, measureDrag.start.fy);
+  } else if (measureDrag.type === 'mark' && measureDrag.moved) {
+    // Only reorder + re-render if the marker was actually dragged; a plain click
+    // must leave the DOM intact so a following dblclick can delete it.
+    state.measure.hMarks.sort((a, b) => a - b);
+    state.measure.vMarks.sort((a, b) => a - b);
+    renderMeasure();
+  }
+  measureDrag = null;
+});
+
+function drawMeasureLabel(ctx, text, x, y) {
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = state.color;
+  ctx.fillText(text, x, y);
+}
+
+function bakeMeasure() {
+  const editor = activeEditor();
+  if (editor.versionIndex < 0) {
+    showToast('No image to bake into');
+    return;
+  }
+  const m = state.measure;
+  const W = editor.canvas.width;
+  const H = editor.canvas.height;
+  // Reference rect in image pixels — coords are already image fractions.
+  const rx = m.ref.x * W;
+  const ry = m.ref.y * H;
+  const rw = m.ref.w * W;
+  const rh = m.ref.h * H;
+
+  pushUndo(editor, editor.ctx.getImageData(0, 0, W, H));
+
+  const ctx = editor.ctx;
+  ctx.save();
+  ctx.strokeStyle = state.color;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'miter';
+  ctx.font = '600 15px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  const vline = (x) => { ctx.beginPath(); ctx.moveTo(x, ry); ctx.lineTo(x, ry + rh); ctx.stroke(); };
+  const hline = (y) => { ctx.beginPath(); ctx.moveTo(rx, y); ctx.lineTo(rx + rw, y); ctx.stroke(); };
+
+  // Reference outline (dashed)
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(rx, ry, rw, rh);
+  ctx.setLineDash([]);
+
+  // Width dividers + segment labels along the top edge
+  m.hMarks.forEach((f) => vline(rx + f * rw));
+  const hb = sortedBoundaries(m.hMarks);
+  for (let i = 0; i < hb.length - 1; i++) {
+    drawMeasureLabel(ctx, Math.round((hb[i + 1] - hb[i]) * 100) + '%', rx + ((hb[i] + hb[i + 1]) / 2) * rw, ry + 14);
+  }
+
+  // Height dividers + segment labels along the left edge
+  m.vMarks.forEach((f) => hline(ry + f * rh));
+  const vb = sortedBoundaries(m.vMarks);
+  for (let i = 0; i < vb.length - 1; i++) {
+    drawMeasureLabel(ctx, Math.round((vb[i + 1] - vb[i]) * 100) + '%', rx + 24, ry + ((vb[i] + vb[i + 1]) / 2) * rh);
+  }
+
+  ctx.restore();
+  markVersionChanged(editor);
+  showToast('Measurements baked');
+}
+
+editors.forEach(attachMeasureEvents);
+btnMeasure.addEventListener('click', () => setMeasureOn(!state.measure.on));
+measureAxisButtons.forEach((btn) => btn.addEventListener('click', () => setMeasureAxis(btn.dataset.axis)));
+btnMeasureBake.addEventListener('click', bakeMeasure);
+btnMeasureReset.addEventListener('click', () => {
+  state.measure.refSet = false;
+  state.measure.ref = defaultReferenceRect(activeEditor());
+  state.measure.hMarks = [];
+  state.measure.vMarks = [];
+  renderMeasure();
+});
+
+// Lock the 100% reference to the screenshot's dimensions (true) or the full app
+// area (false). Persists, keeps the toolbar toggle + settings checkbox in sync,
+// and live-snaps the reference to the chosen extent.
+function setMeasureScope(screenshot) {
+  appSettings.measureDefaultScreenshot = screenshot;
+  applyAppSettingsInputs();
+  saveAppSettings();
+  state.measure.refSet = false;
+  state.measure.ref = defaultReferenceRect(activeEditor());
+  renderMeasure();
+}
+
+btnMeasureScope.addEventListener('click', () => setMeasureScope(!appSettings.measureDefaultScreenshot));
+settingMeasureDefaultScreenshot.addEventListener('change', () => setMeasureScope(settingMeasureDefaultScreenshot.checked));
+
+settingMeasureOpacity.addEventListener('input', () => {
+  appSettings.measureOpacity = clamp(parseInt(settingMeasureOpacity.value, 10) / 100, 0.2, 1);
+  renderMeasure();
+});
+settingMeasureOpacity.addEventListener('change', () => { saveAppSettings(); });
 
 window.addEventListener('resize', () => {
   visibleEditors().forEach(fitToArea);
