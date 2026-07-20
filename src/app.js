@@ -428,6 +428,21 @@ function fitToArea(editor) {
   applyTransform(editor);
 }
 
+// Keep the image from being panned/zoomed out of view. A large (zoomed-in) image
+// must keep covering the pane; a small (zoomed-out) image must stay within it —
+// each with a small overscroll margin so it never gets "lost" off-screen.
+function clampPan(editor) {
+  const imgW = editor.canvas.width * editor.zoom;
+  const imgH = editor.canvas.height * editor.zoom;
+  if (!imgW || !imgH) return;
+  const over = 60;
+  const clampAxis = (pan, img, pane) => img >= pane
+    ? clamp(pan, pane - over - img, over)   // large: cover the pane, ±over margin
+    : clamp(pan, 0, pane - img);            // small: stay fully within the pane
+  editor.panX = clampAxis(editor.panX, imgW, editor.pane.clientWidth);
+  editor.panY = clampAxis(editor.panY, imgH, editor.pane.clientHeight);
+}
+
 function initCropFrame(editor) {
   editor.cropFrame = {
     x: 0,
@@ -659,6 +674,7 @@ function attachEditorEvents(editor) {
     editor.zoom = newZoom;
     editor.panX = mouseX - canvasX * newZoom;
     editor.panY = mouseY - canvasY * newZoom;
+    clampPan(editor);
     applyTransform(editor);
   }, { passive: false });
 
@@ -749,6 +765,7 @@ document.addEventListener('mousemove', (e) => {
   if (panning) {
     panning.panX = e.clientX - panning.panStartX;
     panning.panY = e.clientY - panning.panStartY;
+    clampPan(panning);
     applyTransform(panning);
     return;
   }
