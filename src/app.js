@@ -3,6 +3,23 @@
 const UNDO_LIMIT = 50;
 const ERASE_RADIUS = 15;
 
+// Browsers refuse to back a canvas past a fixed edge/area budget (16384px per
+// side, 16384^2 total in Chromium/WebView2). Past it the 2D context silently
+// paints nothing and toDataURL() returns the empty URL "data:," — which used to
+// travel all the way to disk as a 0-byte .png reported as "Saved". Both the
+// import and the export path have to know the budget rather than discover it.
+const MAX_CANVAS_EDGE = 16384;
+const MAX_CANVAS_AREA = 16384 * 16384;
+
+// Largest multiplier that keeps w x h inside both budgets (1 when it fits).
+function canvasFitFactor(w, h) {
+  return Math.min(1, MAX_CANVAS_EDGE / w, MAX_CANVAS_EDGE / h, Math.sqrt(MAX_CANVAS_AREA / (w * h)));
+}
+
+function exceedsCanvasBudget(w, h) {
+  return w > MAX_CANVAS_EDGE || h > MAX_CANVAS_EDGE || w * h > MAX_CANVAS_AREA;
+}
+
 const state = {
   versions: [],
   activeVersion: -1,
@@ -104,6 +121,7 @@ function makeEditor(index, ids) {
     panStartX: 0,
     panStartY: 0,
     isRotating: false,
+    viewAdjusted: false,
     rotateCenter: { x: 0, y: 0 },
     rotateStartAngle: 0,
     rotateStartMouseAngle: 0,
@@ -300,6 +318,7 @@ function clearEditor(editor) {
   editor.zoom = 1;
   editor.panX = 0;
   editor.panY = 0;
+  editor.viewAdjusted = false;
   editor.isDrawing = false;
   editor.snapshot = null;
   editor.preActionSnapshot = null;
@@ -382,12 +401,42 @@ function drawShapePreview(editor, x1, y1, x2, y2) {
   }
 }
 
+// An undo entry is the whole editable state of a version, not just its pixels.
+// Rotation, brightness and contrast used to sit outside the history, so Ctrl+Z
+// after a rotate skipped past it and silently threw away the previous drawing.
+function versionSnapshot(editor, v) {
+  if (!v || !editor.canvas.width || !editor.canvas.height) return null;
+  return {
+    image: editor.ctx.getImageData(0, 0, editor.canvas.width, editor.canvas.height),
+    rotation: v.rotation,
+    brightness: v.brightness,
+    contrast: v.contrast,
+  };
+}
+
+function restoreVersionSnapshot(editor, v, snap) {
+  editor.ctx.putImageData(snap.image, 0, 0);
+  v.annotationData = snap.image;
+  v.rotation = snap.rotation;
+  v.brightness = snap.brightness;
+  v.contrast = snap.contrast;
+  applyBC(editor);
+  applyTransform(editor);
+}
+
 function pushUndo(editor, snapshot) {
   const v = editor.versionIndex >= 0 ? state.versions[editor.versionIndex] : null;
   if (!v || !snapshot) return;
   v.undoStack.push(snapshot);
   if (v.undoStack.length > UNDO_LIMIT) v.undoStack.shift();
   v.redoStack = [];
+}
+
+// Record the pre-change state for an edit that isn't a canvas stroke
+// (rotate buttons, ctrl+drag rotate, the brightness/contrast sliders).
+function pushVersionUndo(editor = activeEditor()) {
+  const v = editor.versionIndex >= 0 ? state.versions[editor.versionIndex] : null;
+  pushUndo(editor, versionSnapshot(editor, v));
 }
 
 function saveEditorCanvasToVersion(editor) {
@@ -425,6 +474,7 @@ function fitToArea(editor) {
   editor.zoom = Math.min(availW / editor.canvas.width, availH / editor.canvas.height);
   editor.panX = (availW - editor.canvas.width * editor.zoom) / 2;
   editor.panY = (availH - editor.canvas.height * editor.zoom) / 2;
+  editor.viewAdjusted = false;
   applyTransform(editor);
 }
 
@@ -542,7 +592,7 @@ function onCanvasMouseDown(editor, e) {
   editor.isDrawing = true;
   editor.startX = x;
   editor.startY = y;
-  editor.preActionSnapshot = editor.ctx.getImageData(0, 0, editor.canvas.width, editor.canvas.height);
+  editor.preActionSnapshot = versionSnapshot(editor, state.versions[editor.versionIndex]);
 
   if (state.tool === 'erase') {
     eraseAtPoint(editor, x, y);
@@ -617,7 +667,7 @@ function commitText(editor) {
   const val = editor.textInput.value.trim();
   editor.textInputWrapper.style.display = 'none';
   if (!val || editor.versionIndex < 0) return;
-  pushUndo(editor, editor.ctx.getImageData(0, 0, editor.canvas.width, editor.canvas.height));
+  pushVersionUndo(editor);
   setupCtx(editor);
   editor.ctx.font = `${state.textSize}px "Segoe UI", system-ui, sans-serif`;
   editor.ctx.strokeStyle = '#000';
@@ -646,6 +696,7 @@ function attachEditorEvents(editor) {
     }
     if (e.button === 0 && e.ctrlKey && editor.versionIndex >= 0) {
       e.preventDefault();
+      pushVersionUndo(editor);
       editor.isRotating = true;
       const v = state.versions[editor.versionIndex];
       editor.rotateStartAngle = v.rotation;
@@ -674,6 +725,7 @@ function attachEditorEvents(editor) {
     editor.zoom = newZoom;
     editor.panX = mouseX - canvasX * newZoom;
     editor.panY = mouseY - canvasY * newZoom;
+    editor.viewAdjusted = true;
     clampPan(editor);
     applyTransform(editor);
   }, { passive: false });
@@ -765,6 +817,7 @@ document.addEventListener('mousemove', (e) => {
   if (panning) {
     panning.panX = e.clientX - panning.panStartX;
     panning.panY = e.clientY - panning.panStartY;
+    panning.viewAdjusted = true;
     clampPan(panning);
     applyTransform(panning);
     return;
@@ -856,11 +909,10 @@ function undo() {
   if (editor.versionIndex < 0) return;
   const v = state.versions[editor.versionIndex];
   if (!v.undoStack.length) return;
-  const current = editor.ctx.getImageData(0, 0, editor.canvas.width, editor.canvas.height);
+  const current = versionSnapshot(editor, v);
+  if (!current) return;
   v.redoStack.push(current);
-  const snap = v.undoStack.pop();
-  editor.ctx.putImageData(snap, 0, 0);
-  v.annotationData = snap;
+  restoreVersionSnapshot(editor, v, v.undoStack.pop());
   v.modified = true;
   refreshEditorsForVersion(editor.versionIndex, editor);
   showToast('Undo');
@@ -871,11 +923,10 @@ function redo() {
   if (editor.versionIndex < 0) return;
   const v = state.versions[editor.versionIndex];
   if (!v.redoStack.length) return;
-  const current = editor.ctx.getImageData(0, 0, editor.canvas.width, editor.canvas.height);
+  const current = versionSnapshot(editor, v);
+  if (!current) return;
   v.undoStack.push(current);
-  const snap = v.redoStack.pop();
-  editor.ctx.putImageData(snap, 0, 0);
-  v.annotationData = snap;
+  restoreVersionSnapshot(editor, v, v.redoStack.pop());
   v.modified = true;
   refreshEditorsForVersion(editor.versionIndex, editor);
   showToast('Redo');
@@ -1025,6 +1076,11 @@ function setSplitMode(on) {
     } else {
       clearEditor(right);
     }
+    // Leaving split with the RIGHT pane focused copies its version into the left
+    // pane while the right pane keeps its own — so re-entering split would bind
+    // BOTH panes to one version, which makes that tab render as active *and*
+    // "already open in the other editor", unselectable in either pane.
+    ensureUniqueVisibleEditors();
     fitToArea(left);
     focusEditor(activeEditor().pane.hidden ? left : activeEditor());
   } else {
@@ -1046,24 +1102,39 @@ function addImageFromDataURL(dataURL, { filePath = null, saveCurrent = true, toa
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      if (saveCurrent) saveVisibleEditorsToVersions();
-      const baseTmp = document.createElement('canvas');
-      baseTmp.width = img.width;
-      baseTmp.height = img.height;
-      const baseTmpCtx = baseTmp.getContext('2d');
-      baseTmpCtx.drawImage(img, 0, 0);
-      const baseImageData = baseTmpCtx.getImageData(0, 0, img.width, img.height);
-      const annotationData = new ImageData(img.width, img.height);
-      const newIdx = state.versions.length;
-      state.versions.push(makeVersion(baseImageData, annotationData, filePath));
-      const editor = activeEditor();
-      editor.versionIndex = newIdx;
-      state.activeVersion = newIdx;
-      loadVersionToEditor(editor, state.versions[newIdx], { fit: true });
-      renderTabs();
-      updateActiveControls();
-      if (toastMessage) showToast(toastMessage(newIdx));
-      resolve(true);
+      // Everything below can throw on a big picture — an over-budget canvas
+      // reads back as blank, and the ImageData allocation is refused outright.
+      // An escaping throw here never settles the promise, so callers that await
+      // it (Open Images loops over every file) hang with no error and no toast.
+      try {
+        if (exceedsCanvasBudget(img.width, img.height)) {
+          showToast(`Image too large to open (${img.width}x${img.height})`);
+          resolve(false);
+          return;
+        }
+        if (saveCurrent) saveVisibleEditorsToVersions();
+        const baseTmp = document.createElement('canvas');
+        baseTmp.width = img.width;
+        baseTmp.height = img.height;
+        const baseTmpCtx = baseTmp.getContext('2d');
+        baseTmpCtx.drawImage(img, 0, 0);
+        const baseImageData = baseTmpCtx.getImageData(0, 0, img.width, img.height);
+        const annotationData = new ImageData(img.width, img.height);
+        const newIdx = state.versions.length;
+        state.versions.push(makeVersion(baseImageData, annotationData, filePath));
+        const editor = activeEditor();
+        editor.versionIndex = newIdx;
+        state.activeVersion = newIdx;
+        loadVersionToEditor(editor, state.versions[newIdx], { fit: true });
+        renderTabs();
+        updateActiveControls();
+        if (toastMessage) showToast(toastMessage(newIdx));
+        resolve(true);
+      } catch (error) {
+        console.error('Failed to import image:', error);
+        showToast('Could not open that image — out of memory');
+        resolve(false);
+      }
     };
     img.onerror = () => resolve(false);
     img.src = dataURL;
@@ -1082,11 +1153,14 @@ async function pasteFromClipboard() {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key === 'z' && !hasActiveTextInput()) {
+  // e.key is 'Z' (uppercase) while Shift is held, so both cases are matched
+  // explicitly; Ctrl+Shift+Z is the usual redo alias alongside Ctrl+Y.
+  const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+  if (e.ctrlKey && key === 'z' && !e.shiftKey && !hasActiveTextInput()) {
     e.preventDefault();
     undo();
   }
-  if (e.ctrlKey && e.key === 'y' && !hasActiveTextInput()) {
+  if (e.ctrlKey && (key === 'y' || (key === 'z' && e.shiftKey)) && !hasActiveTextInput()) {
     e.preventDefault();
     redo();
   }
@@ -1176,9 +1250,31 @@ textSizeSelect.addEventListener('change', () => {
   });
 });
 
+// A slider drag fires `input` continuously; record the pre-drag state once at
+// the start of the gesture and commit that single entry on `change` (release),
+// so one drag is one undo step rather than a hundred.
+const sliderGestureSnapshots = new Map();
+
+function beginSliderUndo(slider) {
+  if (sliderGestureSnapshots.has(slider)) return;
+  const editor = activeEditor();
+  const snap = versionSnapshot(editor, activeVersion());
+  if (snap) sliderGestureSnapshots.set(slider, snap);
+}
+
+function endSliderUndo(slider) {
+  const snap = sliderGestureSnapshots.get(slider);
+  sliderGestureSnapshots.delete(slider);
+  if (snap) pushUndo(activeEditor(), snap);
+}
+
+brightnessSlider.addEventListener('change', () => endSliderUndo(brightnessSlider));
+contrastSlider.addEventListener('change', () => endSliderUndo(contrastSlider));
+
 brightnessSlider.addEventListener('input', () => {
   const v = activeVersion();
   if (!v) return;
+  beginSliderUndo(brightnessSlider);
   v.brightness = parseInt(brightnessSlider.value, 10);
   v.modified = true;
   brightnessValue.textContent = v.brightness;
@@ -1190,6 +1286,7 @@ brightnessSlider.addEventListener('input', () => {
 contrastSlider.addEventListener('input', () => {
   const v = activeVersion();
   if (!v) return;
+  beginSliderUndo(contrastSlider);
   v.contrast = parseInt(contrastSlider.value, 10);
   v.modified = true;
   contrastValue.textContent = v.contrast;
@@ -1201,6 +1298,7 @@ contrastSlider.addEventListener('input', () => {
 btnResetBrightness.addEventListener('click', () => {
   const v = activeVersion();
   if (!v) return;
+  pushVersionUndo();
   v.brightness = 100;
   v.modified = true;
   visibleEditors()
@@ -1212,6 +1310,7 @@ btnResetBrightness.addEventListener('click', () => {
 btnResetContrast.addEventListener('click', () => {
   const v = activeVersion();
   if (!v) return;
+  pushVersionUndo();
   v.contrast = 100;
   v.modified = true;
   visibleEditors()
@@ -1223,6 +1322,7 @@ btnResetContrast.addEventListener('click', () => {
 btnRotateCW.addEventListener('click', () => {
   const v = activeVersion();
   if (!v) return;
+  pushVersionUndo();
   v.rotation = ((v.rotation + 90) % 360 + 360) % 360;
   v.modified = true;
   refreshEditorsForVersion(activeEditor().versionIndex);
@@ -1234,6 +1334,7 @@ btnRotateCW.addEventListener('click', () => {
 btnRotateCCW.addEventListener('click', () => {
   const v = activeVersion();
   if (!v) return;
+  pushVersionUndo();
   v.rotation = ((v.rotation - 90) % 360 + 360) % 360;
   v.modified = true;
   refreshEditorsForVersion(activeEditor().versionIndex);
@@ -1245,6 +1346,7 @@ btnRotateCCW.addEventListener('click', () => {
 btnResetRotation.addEventListener('click', () => {
   const v = activeVersion();
   if (!v) return;
+  pushVersionUndo();
   v.rotation = 0;
   v.modified = true;
   visibleEditors()
@@ -1271,8 +1373,21 @@ function getOutputDataURL(editor, scale = 1) {
   const rad = v.rotation * Math.PI / 180;
   const cos = Math.abs(Math.cos(rad));
   const sin = Math.abs(Math.sin(rad));
-  const outW = Math.max(1, Math.round((w * cos + h * sin) * scale));
-  const outH = Math.max(1, Math.round((w * sin + h * cos) * scale));
+
+  // Rotation inflates the output (a 45deg turn of a square needs ~2x the area),
+  // so a picture that imported fine can still overflow the canvas budget here.
+  // Shrink to fit rather than emit an empty image, and say so.
+  let s = scale;
+  let note = null;
+  const wantW = Math.max(1, Math.round((w * cos + h * sin) * s));
+  const wantH = Math.max(1, Math.round((w * sin + h * cos) * s));
+  const fit = canvasFitFactor(wantW, wantH);
+  if (fit < 1) s = scale * fit;
+
+  const outW = Math.max(1, Math.round((w * cos + h * sin) * s));
+  const outH = Math.max(1, Math.round((w * sin + h * cos) * s));
+  if (fit < 1) note = `downscaled to ${outW}x${outH} (canvas limit)`;
+
   const tmp = document.createElement('canvas');
   tmp.width = outW;
   tmp.height = outH;
@@ -1280,12 +1395,18 @@ function getOutputDataURL(editor, scale = 1) {
 
   tCtx.translate(outW / 2, outH / 2);
   tCtx.rotate(rad);
-  tCtx.translate(-(w * scale) / 2, -(h * scale) / 2);
+  tCtx.translate(-(w * s) / 2, -(h * s) / 2);
   tCtx.filter = `brightness(${v.brightness / 100}) contrast(${v.contrast / 100})`;
-  tCtx.drawImage(baseTmp, x, y, w, h, 0, 0, w * scale, h * scale);
+  tCtx.drawImage(baseTmp, x, y, w, h, 0, 0, w * s, h * s);
   tCtx.filter = 'none';
-  tCtx.drawImage(annTmp, x, y, w, h, 0, 0, w * scale, h * scale);
-  return tmp.toDataURL('image/png');
+  tCtx.drawImage(annTmp, x, y, w, h, 0, 0, w * s, h * s);
+
+  const dataURL = tmp.toDataURL('image/png');
+  // Last line of defence: never hand a caller something that isn't a PNG. An
+  // over-budget canvas yields the 6-character "data:," and every downstream
+  // consumer (disk, clipboard) would accept it silently.
+  if (!dataURL.startsWith('data:image/png') || dataURL.length < 64) return null;
+  return { dataURL, note };
 }
 
 function autoTimestamp() {
@@ -1335,11 +1456,18 @@ async function save() {
     filePath = joinPath(folder, savedName);
   }
 
-  const ok = await window.annotatorAPI.saveFile({ path: filePath, dataURL: getOutputDataURL(editor, 1) });
+  const out = getOutputDataURL(editor, 1);
+  if (!out) {
+    showToast('Export failed — image too large to render');
+    return;
+  }
+
+  const ok = await window.annotatorAPI.saveFile({ path: filePath, dataURL: out.dataURL });
   if (ok) {
     v.filePath = filePath;
     v.modified = false;
-    showToast(savedName ? `Saved: ${savedName}` : 'Saved');
+    const base = savedName ? `Saved: ${savedName}` : 'Saved';
+    showToast(out.note ? `${base} — ${out.note}` : base);
   } else {
     showToast('Save failed');
   }
@@ -1349,8 +1477,13 @@ async function saveAs() {
   const editor = activeEditor();
   if (editor.versionIndex < 0) return;
   saveVisibleEditorsToVersions();
+  const out = getOutputDataURL(editor, 1);
+  if (!out) {
+    showToast('Export failed — image too large to render');
+    return;
+  }
   const filePath = await window.annotatorAPI.saveFileAs({
-    dataURL: getOutputDataURL(editor, 1),
+    dataURL: out.dataURL,
     defaultName: `screenshot_${autoTimestamp()}_${editor.versionIndex + 1}.png`,
   });
   if (filePath) {
@@ -1358,7 +1491,7 @@ async function saveAs() {
     v.filePath = filePath;
     v.manualFileName = true;
     v.modified = false;
-    showToast('Saved');
+    showToast(out.note ? `Saved — ${out.note}` : 'Saved');
   }
 }
 
@@ -1369,8 +1502,17 @@ async function copyImage() {
     return;
   }
   saveVisibleEditorsToVersions();
-  const ok = await window.annotatorAPI.writeClipboardImage(getOutputDataURL(editor, copyScale));
-  showToast(ok ? 'Copied to clipboard' : 'Copy failed');
+  const out = getOutputDataURL(editor, copyScale);
+  if (!out) {
+    showToast('Copy failed — image too large to render');
+    return;
+  }
+  const ok = await window.annotatorAPI.writeClipboardImage(out.dataURL);
+  if (!ok) {
+    showToast('Copy failed');
+    return;
+  }
+  showToast(out.note ? `Copied — ${out.note}` : 'Copied to clipboard');
 }
 
 btnSave.addEventListener('click', save);
@@ -1678,7 +1820,7 @@ function bakeMeasure() {
   const rw = m.ref.w * W;
   const rh = m.ref.h * H;
 
-  pushUndo(editor, editor.ctx.getImageData(0, 0, W, H));
+  pushVersionUndo(editor);
 
   const ctx = editor.ctx;
   ctx.save();
@@ -1750,8 +1892,19 @@ settingMeasureOpacity.addEventListener('input', () => {
 });
 settingMeasureOpacity.addEventListener('change', () => { saveAppSettings(); });
 
+// Refit only the panes still showing the automatic fit. Once the user has
+// zoomed or panned deliberately, a resize (or a DPI change, which arrives as
+// one) must keep their view instead of snapping back to fit and losing the
+// detail they were looking at.
 window.addEventListener('resize', () => {
-  visibleEditors().forEach(fitToArea);
+  visibleEditors().forEach((editor) => {
+    if (editor.viewAdjusted) {
+      clampPan(editor);
+      applyTransform(editor);
+    } else {
+      fitToArea(editor);
+    }
+  });
 });
 
 async function init() {

@@ -9,7 +9,9 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "tauri": "tauri",
-    "check": "node --check src/api.js && node --check src/app.js"
+    "check": "node --check src/api.js && node --check src/app.js",
+    "test": "node --test tests/regression.test.mjs",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
