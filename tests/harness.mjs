@@ -7,7 +7,8 @@
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -167,28 +168,103 @@ class CDP {
   }
 }
 
+// ── Browser lifetime ──────────────────────────────────────────────────────────
+
+// spawn() puts the browser in no job object on Windows, so nothing reaps it if
+// this process goes away without close() running — a Ctrl-C, a throw in before(),
+// the test runner being killed. Nine full Edge trees (81 processes, 4.6 GB) once
+// survived a single night of aborted runs, and each one kept holding its debug
+// port. Kill the tree explicitly on the way out.
+const liveBrowsers = new Set();
+let cleanupHooked = false;
+
+function killTree(pid, profile) {
+  if (process.platform !== 'win32') {
+    try { if (pid) process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
+    return;
+  }
+  if (pid) spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], { stdio: 'ignore' });
+  // Belt and braces for the relaunch described at the spawn below: if Edge ever
+  // hands the tree off to a process we never learned the pid of, the profile dir
+  // still names it. It is unique per launch, so this can only match our browser.
+  if (!profile) return;
+  spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" `
+    + `| Where-Object { $_.CommandLine -like '*${profile.replace(/'/g, "''")}*' } `
+    + `| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+  ], { stdio: 'ignore' });
+}
+
+function hookCleanup() {
+  if (cleanupHooked) return;
+  cleanupHooked = true;
+  // Must stay synchronous: 'exit' handlers cannot await. The profile dirs matter
+  // as much as the processes — the leaked ones had reached 2.35 GB of temp.
+  const reapAll = () => {
+    for (const b of liveBrowsers) {
+      killTree(b.pid, b.profile);
+      // retryDelay covers the moment the dying browser still holds its own files.
+      try { rmSync(b.profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+      catch { /* the browser outlived the retries; the temp sweeper gets it */ }
+    }
+    liveBrowsers.clear();
+  };
+  process.on('exit', reapAll);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+    process.on(sig, () => { reapAll(); process.exit(130); });
+  }
+}
+
 export async function launchBrowser({ url, dpr = 1 }) {
   const browser = process.env.TEST_BROWSER
     || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const profile = await mkdtemp(join(tmpdir(), 'annot-test-'));
-  const port = 9500 + Math.floor(Math.random() * 400);
+  hookCleanup();
+
+  // Port 0 = let the browser take a free one and write it to DevToolsActivePort.
+  // This used to guess `9500 + random(400)` with no bind check, which collided
+  // two ways: with leaked browsers from earlier runs, and with the live Tauri
+  // fleet, whose `td`-assigned CDP ports occupy 9400-9599. A collision does not
+  // fail loudly — the new browser cannot bind, so the probe below is answered by
+  // whatever already owns the port, and the suite drives the WRONG page.
+  // --edge-skip-compat-layer-relaunch is not cosmetic: without it Edge's compat
+  // layer relaunches itself (appending this very flag) and lets the process we
+  // were handed exit, so proc.pid becomes a corpse and the real tree is orphaned
+  // with a dead parent. That is why the old proc.kill() never reaped anything.
   const proc = spawn(browser, [
     '--headless=new',
-    `--remote-debugging-port=${port}`,
+    '--remote-debugging-port=0',
     `--user-data-dir=${profile}`,
     `--force-device-scale-factor=${dpr}`,
     '--no-first-run', '--no-default-browser-check', '--disable-gpu',
+    '--edge-skip-compat-layer-relaunch',
     '--window-size=1400,900',
     url,
   ], { stdio: 'ignore' });
+  liveBrowsers.add({ pid: proc.pid, profile });
 
-  // Wait for the debugger, then attach to the page target.
+  // The browser writes the port it actually got once the debugger is listening.
+  const portFile = join(profile, 'DevToolsActivePort');
+  let port = null;
+  for (let i = 0; i < 100 && port === null; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    try {
+      const first = (await readFile(portFile, 'utf8')).split('\n')[0].trim();
+      if (first) port = Number(first);
+    } catch { /* not written yet */ }
+  }
+  if (port === null) throw new Error('browser debugger never came up');
+
+  // Match the exact URL we asked for, not merely "something on 127.0.0.1" —
+  // every leaked harness page matched that, so a stale browser could pass for
+  // ours. With an ephemeral port a foreign target is no longer reachable here,
+  // but a loose filter would still hide the mistake if it ever were.
   let wsUrl = null;
   for (let i = 0; i < 100 && !wsUrl; i++) {
     await new Promise((r) => setTimeout(r, 150));
     try {
       const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-      const page = targets.find((t) => t.type === 'page' && t.url.includes('127.0.0.1'));
+      const page = targets.find((t) => t.type === 'page' && t.url.startsWith(url));
       if (page) wsUrl = page.webSocketDebuggerUrl;
     } catch { /* not up yet */ }
   }
@@ -207,7 +283,10 @@ export async function launchBrowser({ url, dpr = 1 }) {
     cdp,
     async close() {
       try { ws.close(); } catch { /* already gone */ }
-      proc.kill();
+      // proc.kill() only reached the root process; the renderer, GPU and crashpad
+      // children outlived it and kept the profile dir locked.
+      for (const b of liveBrowsers) if (b.pid === proc.pid) liveBrowsers.delete(b);
+      killTree(proc.pid, profile);
       await rm(profile, { recursive: true, force: true }).catch(() => {});
     },
   };
