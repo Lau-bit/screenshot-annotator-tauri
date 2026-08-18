@@ -717,7 +717,29 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // One copy only. Two would share `%APPDATA%\com.slaur.screenshot-annotator`'s
+    // settings.json (every setter is a read-modify-write, so the loser's edits
+    // vanish) and the same WebView2 profile, where the second process gets no
+    // webview at all and lingers windowless. A second launch is treated as
+    // "bring the annotator to me", which is the only thing double-clicking it
+    // twice can mean. The callback NEVER builds a window — doing that inside the
+    // single-instance handler deadlocks the app (see the fleet note on it).
+    //
+    // The escape hatch exists so a verification instance can run over CDP beside
+    // the user's copy (set WEBVIEW2_USER_DATA_FOLDER too, or WebView2 refuses it).
+    let mut builder = tauri::Builder::default();
+    if std::env::var("SCREENSHOT_ANNOTATOR_MULTI").is_err() {
+        // Registered first, so it settles before any other plugin does work.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let settings = load_settings(app.handle());
