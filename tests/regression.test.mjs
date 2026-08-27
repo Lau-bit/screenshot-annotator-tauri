@@ -326,6 +326,145 @@ describe('zoom and view', () => {
   });
 });
 
+describe('auto-crop to the visible area', () => {
+  // Restore the default between cases — the toggle is persisted app settings,
+  // so a case that turns it off would otherwise poison every case after it.
+  const setAutoCrop = (on) => cdp.eval(`await setAutoCropToZoom(${on}); return appSettings.autoCropToZoom;`);
+
+  test('the wheel will not zoom out past the fit-to-pane floor', async () => {
+    // Was: the floor was a flat 0.05, so the image could be wheeled down to a
+    // stamp adrift in the middle of an empty pane.
+    await reset(2000, 1500);
+    const r = await cdp.eval(`
+      const ed = editors[0];
+      const floor = minZoomFor(ed);
+      for (let i = 0; i < 40; i++) {
+        ed.pane.dispatchEvent(new WheelEvent('wheel',
+          { deltaY: 120, clientX: 300, clientY: 250, bubbles: true, cancelable: true }));
+      }
+      return { floor: +floor.toFixed(6), zoom: +ed.zoom.toFixed(6), atMin: atMinZoom(ed) };
+    `);
+    assert.ok(r.floor > 0.05, 'the fit floor should be well above the old flat minimum');
+    assert.equal(r.zoom, r.floor, 'the wheel got past the fit-to-pane floor');
+    assert.equal(r.atMin, true);
+  });
+
+  test('at the floor the image can still be panned past the pane edge', async () => {
+    // Was: a fitted image was clamped fully inside the pane, so an edge sitting
+    // under a toolbar could never be dragged into the open.
+    await reset(2000, 1500);
+    const r = await cdp.eval(`
+      const ed = editors[0];
+      fitToArea(ed);
+      ed.panX = -100000;
+      clampPan(ed);
+      return { panX: ed.panX, imgW: ed.canvas.width * ed.zoom, paneW: ed.pane.clientWidth };
+    `);
+    assert.ok(r.panX < 0, 'the image is still locked inside the pane');
+    assert.ok(r.panX + r.imgW >= 1, 'the image was allowed to leave the pane entirely');
+  });
+
+  test('a copy at the floor sends the whole image, however it is panned', async () => {
+    await reset(1200, 900);
+    const r = await cdp.eval(`
+      const ed = editors[0];
+      fitToArea(ed);
+      ed.panX -= 200; ed.panY -= 150; clampPan(ed); applyTransform(ed);
+      let sent = null;
+      window.__mock.setHandler('write_clipboard_image', (a) => { sent = a.dataUrl; return true; });
+      await copyImage();
+      const img = new Image();
+      await new Promise((res) => { img.onload = res; img.src = sent; });
+      return { dims: [img.width, img.height], active: autoCropActive(ed),
+               setting: appSettings.autoCropToZoom,
+               lamp: btnAutoCrop.className };
+    `);
+    assert.equal(r.setting, true, 'auto-crop should default on');
+    assert.equal(r.active, false, 'auto-crop must stand down at minimum zoom');
+    assert.deepEqual(r.dims, [1200, 900], 'the floor state must copy the whole image');
+    assert.match(r.lamp, /state-armed/, 'the lamp should read armed-but-idle at the floor');
+  });
+
+  test('a copy while zoomed in sends only the visible slice', async () => {
+    await reset(1200, 900);
+    const r = await cdp.eval(`
+      const ed = editors[0];
+      ed.zoom = 3; ed.panX = -600; ed.panY = -300;
+      ed.viewAdjusted = true; clampPan(ed); applyTransform(ed);
+      const vis = visibleImageRect(ed);
+      let sent = null;
+      window.__mock.setHandler('write_clipboard_image', (a) => { sent = a.dataUrl; return true; });
+      await copyImage();
+      const img = new Image();
+      await new Promise((res) => { img.onload = res; img.src = sent; });
+      return { dims: [img.width, img.height], vis, active: autoCropActive(ed),
+               lamp: btnAutoCrop.className,
+               toast: document.getElementById('toast').textContent };
+    `);
+    assert.equal(r.active, true);
+    assert.match(r.lamp, /state-active/, 'the lamp should read active while it will crop');
+    const expW = Math.min(1200, r.vis.x + r.vis.w) - Math.max(0, r.vis.x);
+    const expH = Math.min(900, r.vis.y + r.vis.h) - Math.max(0, r.vis.y);
+    assert.deepEqual(r.dims, [expW, expH], 'the clipboard did not match the visible slice');
+    assert.ok(r.dims[0] < 1200 || r.dims[1] < 900, 'nothing was actually cropped');
+    assert.match(r.toast, /visible area/);
+  });
+
+  test('a manual crop frame still bounds the auto-crop', async () => {
+    await reset(1200, 900);
+    const r = await cdp.eval(`
+      const ed = editors[0];
+      ed.cropFrame = { x: 100, y: 100, w: 400, h: 300 };
+      updateCropOverlayDOM(ed);
+      ed.zoom = 3; ed.panX = 0; ed.panY = 0;
+      ed.viewAdjusted = true; clampPan(ed); applyTransform(ed);
+      const out = getOutputDataURL(ed, 1, { autoCrop: autoCropActive(ed) });
+      const img = new Image();
+      await new Promise((res) => { img.onload = res; img.src = out.dataURL; });
+      return { dims: [img.width, img.height], vis: visibleImageRect(ed) };
+    `);
+    assert.ok(r.dims[0] <= 400 && r.dims[1] <= 300,
+      `auto-crop escaped the manual crop frame: ${r.dims}`);
+  });
+
+  test('turning the toggle off restores the whole-image copy', async () => {
+    await reset(1200, 900);
+    try {
+      const r = await cdp.eval(`
+        const ed = editors[0];
+        ed.zoom = 3; ed.panX = -600; ed.panY = -300;
+        ed.viewAdjusted = true; clampPan(ed); applyTransform(ed);
+        await setAutoCropToZoom(false);
+        let sent = null;
+        window.__mock.setHandler('write_clipboard_image', (a) => { sent = a.dataUrl; return true; });
+        await copyImage();
+        const img = new Image();
+        await new Promise((res) => { img.onload = res; img.src = sent; });
+        return { dims: [img.width, img.height], lamp: btnAutoCrop.className,
+                 checkbox: settingAutoCrop.checked };
+      `);
+      assert.deepEqual(r.dims, [1200, 900], 'the toggle did not stop the crop');
+      assert.match(r.lamp, /state-off/);
+      assert.equal(r.checkbox, false, 'the settings checkbox did not follow the lamp');
+    } finally {
+      assert.equal(await setAutoCrop(true), true);
+    }
+  });
+
+  test('the setting survives a reload', async () => {
+    try {
+      await setAutoCrop(false);
+      const r = await cdp.eval(`
+        const stored = window.__mock.callsTo('set_settings').at(-1).args.data;
+        return normalizeAppSettings(JSON.parse(JSON.stringify(stored))).autoCropToZoom;
+      `);
+      assert.equal(r, false, 'the toggle was not persisted');
+    } finally {
+      await setAutoCrop(true);
+    }
+  });
+});
+
 describe('keyboard shortcuts', () => {
   test('Ctrl+Shift+Z redoes, Ctrl+Z with shift does not undo', async () => {
     await reset(200, 150);

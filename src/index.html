@@ -33,6 +33,11 @@
       <input type="checkbox" id="setting-square-app-corners">
       <span>Square app corners (outer corners only)</span>
     </label>
+    <div class="settings-section-title">Copy</div>
+    <label class="settings-option">
+      <input type="checkbox" id="setting-auto-crop">
+      <span>Auto-crop copy to the visible area (only when zoomed in)</span>
+    </label>
     <div class="settings-section-title">Measurement</div>
     <label class="settings-option">
       <input type="checkbox" id="setting-measure-default-screenshot">
@@ -170,6 +175,11 @@
       <button id="btn-save-as">Save As</button>
     </div>
     <div id="bottom-right">
+      <button type="button" id="btn-auto-crop" class="autocrop-toggle" aria-pressed="true"
+        title="Auto-crop: copy only the visible area (click to toggle)">
+        <span id="auto-crop-led" class="led"></span>
+        <span>Auto-crop</span>
+      </button>
       <span style="color:#666;font-size:11px;">Copy scale:</span>
       <div id="scale-dropdown" class="scale-dropdown">
         <button type="button" id="scale-trigger" class="scale-trigger" aria-haspopup="listbox" aria-expanded="false" title="Scale applied when copying to clipboard">

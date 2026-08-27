@@ -88,6 +88,8 @@ const btnMeasureReset = document.getElementById('btn-measure-reset');
 const btnMeasureScope = document.getElementById('btn-measure-scope');
 const settingMeasureDefaultScreenshot = document.getElementById('setting-measure-default-screenshot');
 const settingMeasureOpacity = document.getElementById('setting-measure-opacity');
+const settingAutoCrop = document.getElementById('setting-auto-crop');
+const btnAutoCrop = document.getElementById('btn-auto-crop');
 
 function getCtx(canvas) {
   return canvas.getContext('2d', { willReadFrequently: true });
@@ -165,7 +167,7 @@ let appSettings = defaultAppSettings();
 let toastTimer;
 
 function defaultAppSettings() {
-  return { squareAppCorners: false, measureOpacity: 0.9, measureDefaultScreenshot: true };
+  return { squareAppCorners: false, measureOpacity: 0.9, measureDefaultScreenshot: true, autoCropToZoom: true };
 }
 
 function normalizeAppSettings(settings) {
@@ -177,11 +179,14 @@ function normalizeAppSettings(settings) {
     measureOpacity: Number.isFinite(s.measureOpacity) ? clamp(s.measureOpacity, 0.2, 1) : 0.9,
     // default true unless explicitly disabled
     measureDefaultScreenshot: s.measureDefaultScreenshot !== false,
+    autoCropToZoom: s.autoCropToZoom !== false,
   };
 }
 
 function applyAppSettingsInputs() {
   settingSquareAppCorners.checked = appSettings.squareAppCorners;
+  settingAutoCrop.checked = appSettings.autoCropToZoom;
+  updateAutoCropIndicator();
   settingMeasureDefaultScreenshot.checked = appSettings.measureDefaultScreenshot;
   settingMeasureOpacity.value = Math.round(appSettings.measureOpacity * 100);
   const scopeShot = appSettings.measureDefaultScreenshot;
@@ -250,6 +255,15 @@ settingSquareAppCorners.addEventListener('change', async () => {
     console.error('Failed to set square app corners:', error);
   }
 });
+
+async function setAutoCropToZoom(on) {
+  appSettings.autoCropToZoom = !!on;
+  updateAutoCropIndicator();
+  await saveAppSettings();
+}
+
+settingAutoCrop.addEventListener('change', () => setAutoCropToZoom(settingAutoCrop.checked));
+btnAutoCrop.addEventListener('click', () => setAutoCropToZoom(!appSettings.autoCropToZoom));
 
 function activeEditor() {
   return editors[state.focusedEditorIndex];
@@ -460,6 +474,7 @@ function applyTransform(editor) {
 
   if (editor === activeEditor()) {
     rotationDisplay.textContent = Math.round(((rotation % 360) + 360) % 360) + '°';
+    updateAutoCropIndicator();
   }
 
   // Keep the image-anchored measure overlay glued to the image as it pans/zooms.
@@ -467,30 +482,152 @@ function applyTransform(editor) {
   if (state.measure.on) renderMeasureEditor(editor);
 }
 
-function fitToArea(editor) {
+// The zoom at which the image is fully shown along its tighter axis — exactly
+// what a paste lands on. Zooming out past it only shrinks an already-complete
+// picture into the middle of the pane, so it is the floor. Capped at 1 so an
+// image smaller than the pane (whose fit blows it up) can still be brought back
+// to native 1:1; both ends of that cap are a "100%" view, of the pane or of the
+// pixels, and neither hides part of the image.
+function fitZoomFor(editor) {
   const availW = editor.pane.clientWidth;
   const availH = editor.pane.clientHeight;
-  if (!availW || !availH || !editor.canvas.width || !editor.canvas.height) return;
-  editor.zoom = Math.min(availW / editor.canvas.width, availH / editor.canvas.height);
-  editor.panX = (availW - editor.canvas.width * editor.zoom) / 2;
-  editor.panY = (availH - editor.canvas.height * editor.zoom) / 2;
+  if (!availW || !availH || !editor.canvas.width || !editor.canvas.height) return null;
+  return Math.min(availW / editor.canvas.width, availH / editor.canvas.height);
+}
+
+function minZoomFor(editor) {
+  const fit = fitZoomFor(editor);
+  return fit === null ? 0.05 : Math.min(fit, 1);
+}
+
+// True when the view sits on that floor — the state in which the whole image is
+// on show and auto-crop deliberately stands down, however the image is panned.
+function atMinZoom(editor) {
+  if (editor.versionIndex < 0) return true;
+  return editor.zoom <= minZoomFor(editor) * 1.001;
+}
+
+function fitToArea(editor) {
+  const fit = fitZoomFor(editor);
+  if (fit === null) return;
+  editor.zoom = fit;
+  editor.panX = (editor.pane.clientWidth - editor.canvas.width * editor.zoom) / 2;
+  editor.panY = (editor.pane.clientHeight - editor.canvas.height * editor.zoom) / 2;
   editor.viewAdjusted = false;
   applyTransform(editor);
 }
 
-// Keep the image from being panned/zoomed out of view. A large (zoomed-in) image
-// must keep covering the pane; a small (zoomed-out) image must stay within it —
-// each with a small overscroll margin so it never gets "lost" off-screen.
+// Keep the image from being panned out of reach. Either way round it must keep
+// `over` pixels inside the pane so it can never be lost off-screen — but that is
+// the ONLY constraint: at minimum zoom the image may still be pushed past the
+// pane edges, so an edge can be worked on without it sitting under a toolbar.
 function clampPan(editor) {
   const imgW = editor.canvas.width * editor.zoom;
   const imgH = editor.canvas.height * editor.zoom;
   if (!imgW || !imgH) return;
-  const over = 60;
-  const clampAxis = (pan, img, pane) => img >= pane
-    ? clamp(pan, pane - over - img, over)   // large: cover the pane, ±over margin
-    : clamp(pan, 0, pane - img);            // small: stay fully within the pane
+  const clampAxis = (pan, img, pane) => {
+    const over = Math.min(60, img);
+    return img >= pane
+      ? clamp(pan, pane - over - img, over)   // large: cover the pane, ±over margin
+      : clamp(pan, over - img, pane - over);  // small: free to leave, `over` stays
+  };
   editor.panX = clampAxis(editor.panX, imgW, editor.pane.clientWidth);
   editor.panY = clampAxis(editor.panY, imgH, editor.pane.clientHeight);
+}
+
+// A pane that grew (a resize, a DPI change, leaving split view) raises the floor
+// under a view the user set by hand. Pull the zoom back up around the pane centre
+// rather than leaving it below the minimum it is now supposed to obey.
+function clampView(editor) {
+  const min = minZoomFor(editor);
+  if (editor.zoom < min) {
+    const paneW = editor.pane.clientWidth;
+    const paneH = editor.pane.clientHeight;
+    const canvasX = (paneW / 2 - editor.panX) / editor.zoom;
+    const canvasY = (paneH / 2 - editor.panY) / editor.zoom;
+    editor.zoom = min;
+    editor.panX = paneW / 2 - canvasX * min;
+    editor.panY = paneH / 2 - canvasY * min;
+  }
+  clampPan(editor);
+}
+
+// The slice of the image, in image pixels, that the pane is showing right now —
+// the inverse of applyTransform's CSS (pan, then zoom, then rotate about the
+// canvas centre). Under rotation the visible region is a rotated rectangle, and
+// this returns its axis-aligned bounding box, which is what a crop can express.
+function visibleImageRect(editor) {
+  const paneW = editor.pane.clientWidth;
+  const paneH = editor.pane.clientHeight;
+  const z = editor.zoom;
+  if (!paneW || !paneH || !z || !editor.canvas.width || !editor.canvas.height) return null;
+
+  const v = editor.versionIndex >= 0 ? state.versions[editor.versionIndex] : null;
+  const rad = -(v ? v.rotation : 0) * Math.PI / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const cx = editor.canvas.width / 2;
+  const cy = editor.canvas.height / 2;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [sx, sy] of [[0, 0], [paneW, 0], [0, paneH], [paneW, paneH]]) {
+    const ux = (sx - editor.panX) / z - cx;
+    const uy = (sy - editor.panY) / z - cy;
+    const x = ux * cos - uy * sin + cx;
+    const y = ux * sin + uy * cos + cy;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const x = Math.floor(minX);
+  const y = Math.floor(minY);
+  return { x, y, w: Math.ceil(maxX) - x, h: Math.ceil(maxY) - y };
+}
+
+function intersectRect(a, b) {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const w = Math.min(a.x + a.w, b.x + b.w) - x;
+  const h = Math.min(a.y + a.h, b.y + b.h) - y;
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
+}
+
+function currentCropRect(editor) {
+  return editor.cropFrame.w > 0 && editor.cropFrame.h > 0
+    ? editor.cropFrame
+    : { x: 0, y: 0, w: editor.canvas.width, h: editor.canvas.height };
+}
+
+// Will the NEXT copy be cropped to the visible area? Off when the setting is
+// off, when there is no image, and — the point of the minimum-zoom floor — when
+// the whole image is already on show, whatever the pan. Also off when a zoom
+// above the floor still leaves nothing hidden (a picture smaller than the pane),
+// so the lamp only claims a difference that the clipboard will actually show.
+function autoCropActive(editor) {
+  if (!appSettings.autoCropToZoom || editor.versionIndex < 0) return false;
+  if (atMinZoom(editor)) return false;
+  const visible = visibleImageRect(editor);
+  if (!visible) return false;
+  const crop = currentCropRect(editor);
+  const inter = intersectRect(crop, visible);
+  return !!inter && (inter.w < crop.w || inter.h < crop.h);
+}
+
+function updateAutoCropIndicator() {
+  if (!btnAutoCrop) return;
+  const editor = activeEditor();
+  const on = !!appSettings.autoCropToZoom;
+  const active = on && autoCropActive(editor);
+  btnAutoCrop.classList.toggle('state-active', active);
+  btnAutoCrop.classList.toggle('state-armed', on && !active);
+  btnAutoCrop.classList.toggle('state-off', !on);
+  btnAutoCrop.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btnAutoCrop.title = !on
+    ? 'Auto-crop off — Copy takes the whole image (click to turn on)'
+    : active
+      ? 'Auto-crop on — Copy takes only the visible area (click to turn off)'
+      : 'Auto-crop on but idle — at minimum zoom the whole image is copied (click to turn off)';
 }
 
 function initCropFrame(editor) {
@@ -522,6 +659,7 @@ function applyBC(editor) {
 }
 
 function updateActiveControls() {
+  updateAutoCropIndicator();
   const v = activeVersion();
   if (!v) {
     brightnessSlider.value = 100;
@@ -716,7 +854,10 @@ function attachEditorEvents(editor) {
     if (editor.versionIndex < 0) return;
     e.preventDefault();
     const factor = e.deltaY > 0 ? 0.9 : 1.1;
-    const newZoom = Math.max(0.05, Math.min(20, editor.zoom * factor));
+    const newZoom = clamp(editor.zoom * factor, minZoomFor(editor), 20);
+    // A wheel that hits the floor changes nothing, so it must not count as the
+    // user "adjusting the view" — that flag is what stops a later resize refitting.
+    if (newZoom === editor.zoom) return;
     const rect = editor.pane.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
@@ -1355,7 +1496,7 @@ btnResetRotation.addEventListener('click', () => {
   updateActiveControls();
 });
 
-function getOutputDataURL(editor, scale = 1) {
+function getOutputDataURL(editor, scale = 1, { autoCrop = false } = {}) {
   const v = editor.versionIndex >= 0 ? state.versions[editor.versionIndex] : null;
   if (!v) return null;
 
@@ -1363,9 +1504,20 @@ function getOutputDataURL(editor, scale = 1) {
   const annTmp = imageDataToCanvas(v.annotationData);
   const fullW = v.baseImageData.width;
   const fullH = v.baseImageData.height;
-  const crop = editor.cropFrame.w > 0 && editor.cropFrame.h > 0
-    ? editor.cropFrame
-    : { x: 0, y: 0, w: fullW, h: fullH };
+  let crop = currentCropRect(editor);
+  if (!(crop.w > 0 && crop.h > 0)) crop = { x: 0, y: 0, w: fullW, h: fullH };
+  let cropped = false;
+  if (autoCrop) {
+    // Narrow the crop to what the pane is showing at this instant. Intersected,
+    // never substituted: a manual crop frame still bounds the result, and the
+    // empty pane around a panned-away image never reaches the output.
+    const visible = visibleImageRect(editor);
+    const inter = visible && intersectRect(crop, visible);
+    if (inter) {
+      cropped = inter.w < crop.w || inter.h < crop.h;
+      crop = inter;
+    }
+  }
   const x = Math.max(0, Math.min(crop.x, fullW - 1));
   const y = Math.max(0, Math.min(crop.y, fullH - 1));
   const w = Math.max(1, Math.min(crop.w, fullW - x));
@@ -1406,6 +1558,7 @@ function getOutputDataURL(editor, scale = 1) {
   // over-budget canvas yields the 6-character "data:," and every downstream
   // consumer (disk, clipboard) would accept it silently.
   if (!dataURL.startsWith('data:image/png') || dataURL.length < 64) return null;
+  if (cropped) note = note ? `visible area, ${note}` : 'visible area';
   return { dataURL, note };
 }
 
@@ -1502,7 +1655,7 @@ async function copyImage() {
     return;
   }
   saveVisibleEditorsToVersions();
-  const out = getOutputDataURL(editor, copyScale);
+  const out = getOutputDataURL(editor, copyScale, { autoCrop: autoCropActive(editor) });
   if (!out) {
     showToast('Copy failed — image too large to render');
     return;
@@ -1899,7 +2052,7 @@ settingMeasureOpacity.addEventListener('change', () => { saveAppSettings(); });
 window.addEventListener('resize', () => {
   visibleEditors().forEach((editor) => {
     if (editor.viewAdjusted) {
-      clampPan(editor);
+      clampView(editor);
       applyTransform(editor);
     } else {
       fitToArea(editor);
