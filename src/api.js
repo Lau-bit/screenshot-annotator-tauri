@@ -26,7 +26,6 @@ window.annotatorAPI = {
     directory: true,
     multiple: false,
   }),
-  openFolder: (folderPath) => invoke('open_folder', { folderPath }),
   pickImages: (folderPath) => dialog.open({
     title: 'Open Images',
     defaultPath: folderPath || undefined,

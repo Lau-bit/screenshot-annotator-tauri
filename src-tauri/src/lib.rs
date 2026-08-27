@@ -8,7 +8,7 @@ use image::{codecs::bmp::BmpDecoder, ImageDecoder};
 use image::{codecs::png::PngEncoder, ColorType, ImageEncoder, ImageReader};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{borrow::Cow, fs, io::Cursor, path::PathBuf, process::Command};
+use std::{borrow::Cow, fs, io::Cursor, path::PathBuf};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
@@ -394,6 +394,15 @@ fn decode_data_url(data_url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Does this byte string really decode as an image?
+fn decodes_as_image(bytes: &[u8]) -> bool {
+    ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.decode().ok())
+        .is_some()
+}
+
 fn data_url_from_clipboard_image(image: ImageData<'_>) -> Option<String> {
     let width = u32::try_from(image.width).ok()?;
     let height = u32::try_from(image.height).ok()?;
@@ -461,6 +470,12 @@ fn read_clipboard_image() -> Option<String> {
         .or_else(read_clipboard_image_windows_fallback)
 }
 
+/// Read any image the frontend names — the path comes from the open dialog, so
+/// it is deliberately unrestricted. It is a *read* of a decodable image only:
+/// anything that is not an image the `image` crate understands returns None, and
+/// the app has no network egress (the CSP has no `connect-src` beyond 'self'),
+/// so there is nowhere for a read to go. Contrast `save_file`, which writes and
+/// therefore validates.
 #[tauri::command]
 fn read_image_file(file_path: String) -> Option<String> {
     let bytes = fs::read(file_path).ok()?;
@@ -508,6 +523,15 @@ fn save_file(file_path: String, data_url: String) -> bool {
     let Ok(bytes) = decode_data_url(&data_url) else {
         return false;
     };
+    // The `data:image/` prefix is a claim, not proof — base64 of *anything*
+    // decodes happily behind it. Writing on the header alone made this command a
+    // general "put these bytes at that path" primitive for whatever runs in the
+    // webview, which is a script away from a .cmd in the Startup folder. The
+    // payload has to actually decode as an image; the original bytes are what
+    // gets written, so a real canvas export lands byte-identical.
+    if !decodes_as_image(&bytes) {
+        return false;
+    }
     let path = PathBuf::from(file_path);
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() {
@@ -517,6 +541,9 @@ fn save_file(file_path: String, data_url: String) -> bool {
     fs::write(path, bytes).is_ok()
 }
 
+/// Create the save folder if it is missing. The path is whatever the folder
+/// dialog returned, so it is unrestricted by design — it creates directories and
+/// nothing else, and `save_file` validates independently of it.
 #[tauri::command]
 fn ensure_folder(folder_path: String) -> bool {
     fs::create_dir_all(folder_path).is_ok()
@@ -529,21 +556,13 @@ fn get_default_save_folder(app: AppHandle) -> Option<String> {
     Some(folder.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-fn open_folder(folder_path: String) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer").arg(folder_path).spawn().is_ok()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(folder_path).spawn().is_ok()
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Command::new("xdg-open").arg(folder_path).spawn().is_ok()
-    }
-}
+// There is deliberately no `open_folder` command. It used to hand an unvalidated
+// frontend string to `explorer <path>`, and explorer resolves its argument as a
+// *shell item*, not a directory: point it at an .exe and it runs it, at a UNC
+// path and Windows hands the credentials to that host. Nothing in the UI ever
+// called it, so the whole "launch a program" primitive existed for no feature at
+// all. If a reveal-in-folder button is ever wanted, canonicalize the path and
+// refuse anything that is not `is_dir()` before spawning.
 
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Value {
@@ -707,6 +726,26 @@ mod tests {
     }
 
     #[test]
+    fn a_non_image_payload_behind_an_image_header_is_not_writable() {
+        // The header can say anything; `save_file` refuses unless the bytes
+        // themselves decode. "@echo off" is what this guard exists to stop
+        // reaching a path like the Startup folder.
+        let bytes = decode_data_url("data:image/png;base64,QGVjaG8gb2ZmDQpjYWxjLmV4ZQ==")
+            .expect("header and base64 are both well-formed — that is the point");
+        assert!(!decodes_as_image(&bytes));
+    }
+
+    #[test]
+    fn a_genuine_png_export_still_decodes_as_an_image() {
+        // Built with the encoder the app itself uses, so this is exactly the
+        // shape a canvas export arrives in. The hand-pasted 1x1 blob below is
+        // NOT usable here: its IDAT chunk is short, which the signature-only
+        // assertion in that test never noticed.
+        let url = png_data_url_from_rgba(2, 2, &[255u8; 16]).expect("encode must succeed");
+        assert!(decodes_as_image(&decode_data_url(&url).unwrap()));
+    }
+
+    #[test]
     fn a_real_png_data_url_still_decodes() {
         // 1x1 transparent PNG.
         let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -755,7 +794,6 @@ pub fn run() {
             ensure_folder,
             get_default_save_folder,
             get_settings,
-            open_folder,
             read_clipboard_image,
             read_image_file,
             save_file,
@@ -767,3 +805,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

@@ -55,7 +55,6 @@ window.__TAURI__ = {
         case 'get_settings': return window.__mock.settings || {};
         case 'set_settings': return true;
         case 'read_image_file': return window.__mock.files[args.filePath] || null;
-        case 'open_folder': return true;
         case 'save_window_shape': return { x: 0, y: 0, width: 800, height: 600 };
         case 'set_window_square_corners': return null;
         default: return null;
